@@ -2,14 +2,14 @@ const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
 const puppeteer = require('puppeteer-core');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 // ---------- Firebase initialization using environment variables ----------
-// Instead of loading a file, build the service account object from ENV vars
 const serviceAccount = {
   projectId: process.env.FIREBASE_PROJECT_ID,
   clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-  // The private key contains literal \n characters; we replace them with actual line breaks.
   privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
 };
 
@@ -30,6 +30,41 @@ const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 // In‑memory session store (for demo; for production use Redis)
 const sessions = new Map();
+
+// ---------- Helper: Find Chromium executable path ----------
+function getChromiumExecutablePath() {
+  // 1. Use environment variable if provided
+  if (process.env.CHROMIUM_PATH) {
+    return process.env.CHROMIUM_PATH;
+  }
+  // 2. Look for Puppeteer's chrome installation
+  const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
+  const chromeDir = path.join(cacheDir, 'chrome');
+  if (fs.existsSync(chromeDir)) {
+    const revisions = fs.readdirSync(chromeDir);
+    if (revisions.length > 0) {
+      // Get the latest revision (highest number)
+      const latestRevision = revisions.sort().reverse()[0];
+      const chromePath = path.join(chromeDir, latestRevision, 'chrome-linux64', 'chrome');
+      if (fs.existsSync(chromePath)) {
+        return chromePath;
+      }
+    }
+  }
+  // 3. Fallback to common paths
+  const commonPaths = [
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable'
+  ];
+  for (const p of commonPaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+  throw new Error('Could not find Chromium executable. Please set CHROMIUM_PATH environment variable.');
+}
 
 // ---------- Webhook Verification ----------
 app.get('/webhook', (req, res) => {
@@ -173,8 +208,11 @@ async function generateStudentReportPDF(student, schoolName) {
       schoolName
     });
 
+    const executablePath = getChromiumExecutablePath();
+    console.log(`Launching Chromium at: ${executablePath}`);
+
     const browser = await puppeteer.launch({
-      executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
+      executablePath,
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
@@ -229,7 +267,9 @@ function buildReportHtml(data) {
         <div><strong>Term:</strong> ${term} – Year: ${year}</div>
       </div>
       <table>
-        <thead><tr><th>Subject</th><th>Marks</th><th>Grade</th><th>Comment</th></tr></thead>
+        <thead>
+          <tr><th>Subject</th><th>Marks</th><th>Grade</th><th>Comment</th></tr>
+        </thead>
         <tbody>${rows}</tbody>
       </table>
       <div class="comment-box"><strong>Teacher's Comment:</strong><br/>${teacherComment || '—'}</div>
