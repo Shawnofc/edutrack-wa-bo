@@ -2,15 +2,22 @@ const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
 const puppeteer = require('puppeteer-core');
-const path = require('path');
 require('dotenv').config();
 
-// ---------- Firebase initialization ----------
-const serviceAccount = require('./firebase-adminsdk.json');
+// ---------- Firebase initialization using environment variables ----------
+// Instead of loading a file, build the service account object from ENV vars
+const serviceAccount = {
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+  // The private key contains literal \n characters; we replace them with actual line breaks.
+  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+};
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  storageBucket: 'your-project-id.appspot.com' // replace with your bucket
+  storageBucket: process.env.STORAGE_BUCKET || 'tech-mobiles-f9f4f.appspot.com'
 });
+
 const db = admin.firestore();
 
 const app = express();
@@ -22,7 +29,6 @@ const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 // In‑memory session store (for demo; for production use Redis)
-// Each session stores: { step, schoolId, studentId }
 const sessions = new Map();
 
 // ---------- Webhook Verification ----------
@@ -51,7 +57,6 @@ app.post('/webhook', async (req, res) => {
 
   console.log(`[${from}] says: ${text}`);
 
-  // Get or create session for this user
   let session = sessions.get(from) || { step: 'start' };
   await handleMessage(from, text, session);
 });
@@ -235,7 +240,7 @@ function buildReportHtml(data) {
   </html>`;
 }
 
-// ---------- Grade & comment helpers (same as in your existing system) ----------
+// ---------- Grade & comment helpers ----------
 function calculateGrade(marks, form) {
   const num = Number(marks);
   if (isNaN(num)) return '-';
