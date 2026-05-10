@@ -1,10 +1,10 @@
 const express = require('express');
 const admin = require('firebase-admin');
-const { PDFGenerator } = require('pdf-light');
-const path = require('path');
+const fetch = require('node-fetch');
+const pdf = require('html-pdf');
 require('dotenv').config();
 
-// ---------- Firebase initialization using environment variables ----------
+// ---------- Firebase initialization ----------
 const serviceAccount = {
   projectId: process.env.FIREBASE_PROJECT_ID,
   clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
@@ -26,7 +26,6 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
-// In‑memory session store (for demo; for production use Redis)
 const sessions = new Map();
 
 // ---------- Webhook Verification ----------
@@ -42,17 +41,14 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// ---------- Main Webhook (Receiving Messages) ----------
+// ---------- Main Webhook ----------
 app.post('/webhook', async (req, res) => {
-  // Acknowledge receipt immediately
   res.sendStatus(200);
-
   const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
   if (!message || message.type !== 'text') return;
 
   const from = message.from;
   const text = message.text.body.trim();
-
   console.log(`[${from}] says: ${text}`);
 
   let session = sessions.get(from) || { step: 'start' };
@@ -61,26 +57,24 @@ app.post('/webhook', async (req, res) => {
 
 // ---------- Conversation Logic ----------
 async function handleMessage(waId, text, session) {
-  // Step 1: Initial greeting / show school list
   if (session.step === 'start') {
     const schools = await getAllSchools();
     if (schools.length === 0) {
-      await sendText(waId, '❌ No schools found in the system. Please contact support.');
+      await sendText(waId, '❌ No schools found.');
       return;
     }
     const schoolList = schools.map((s, idx) => `${idx+1}. ${s.name}`).join('\n');
-    await sendText(waId, `👋 Welcome to EduBot!\n\nPlease select your school by typing the number:\n\n${schoolList}`);
+    await sendText(waId, `👋 Welcome to EduBot!\n\nSelect your school by typing the number:\n\n${schoolList}`);
     session.step = 'awaiting_school';
     sessions.set(waId, session);
     return;
   }
 
-  // Step 2: User selects school (by number)
   if (session.step === 'awaiting_school') {
     const selectedIndex = parseInt(text) - 1;
     const schools = await getAllSchools();
     if (isNaN(selectedIndex) || selectedIndex < 0 || selectedIndex >= schools.length) {
-      await sendText(waId, '❌ Invalid number. Please type the number corresponding to your school.');
+      await sendText(waId, '❌ Invalid number. Try again.');
       return;
     }
     const selectedSchool = schools[selectedIndex];
@@ -92,27 +86,22 @@ async function handleMessage(waId, text, session) {
     return;
   }
 
-  // Step 3: User provides Student ID
   if (session.step === 'awaiting_student_id') {
-    // Student ID format validation (example: STD-123456)
     const studentIdPattern = /^STD-\d{6}$/i;
     if (!studentIdPattern.test(text)) {
-      await sendText(waId, '❌ Invalid Student ID format. Please use the format shown (e.g., STD-123456) or contact your school.');
+      await sendText(waId, '❌ Invalid Student ID format. Use STD-123456.');
       return;
     }
 
     const studentId = text.toUpperCase();
-    // Look up student in Firestore (must match schoolId)
     const student = await findStudentBySchoolAndId(session.schoolId, studentId);
     if (!student) {
-      await sendText(waId, `❌ Student ID *${studentId}* not found in *${session.schoolName}*. Please check and try again.`);
+      await sendText(waId, `❌ Student ID *${studentId}* not found in *${session.schoolName}*.`);
       return;
     }
 
-    // Notify user we are generating
-    await sendText(waId, `🔍 Student found: *${student.name}*\n\n📄 Generating report card...`);
+    await sendText(waId, `🔍 Student found: *${student.name}*\n📄 Generating report card...`);
 
-    // Generate PDF and send
     const pdfBuffer = await generateStudentReportPDF(student, session.schoolName);
     if (!pdfBuffer) {
       await sendText(waId, '❌ Failed to generate report card. Please try again later.');
@@ -121,20 +110,18 @@ async function handleMessage(waId, text, session) {
 
     await sendDocument(waId, pdfBuffer, `Report_${student.name.replace(/\s/g, '')}_${studentId}.pdf`);
 
-    // Session ends – reset for next interaction
     sessions.delete(waId);
-    await sendText(waId, '✅ Report sent! If you need another, just send "Hi" again.');
+    await sendText(waId, '✅ Report sent! Send "Hi" for another.');
     return;
   }
 }
 
-// ---------- Helper: Fetch all schools ----------
+// ---------- Helper Functions ----------
 async function getAllSchools() {
   const snap = await db.collection('schools').get();
   return snap.docs.map(doc => ({ id: doc.id, name: doc.data().name }));
 }
 
-// ---------- Helper: Find student by school ID and studentId field ----------
 async function findStudentBySchoolAndId(schoolId, studentId) {
   const studentsRef = db.collection('students');
   const q = studentsRef.where('schoolId', '==', schoolId).where('studentId', '==', studentId);
@@ -143,10 +130,8 @@ async function findStudentBySchoolAndId(schoolId, studentId) {
   return { id: snap.docs[0].id, ...snap.docs[0].data() };
 }
 
-// ---------- PDF Generation (using pdf-light) ----------
 async function generateStudentReportPDF(student, schoolName) {
   try {
-    // Fetch the latest report card for this student
     const reportsRef = db.collection('reports');
     const q = reportsRef.where('studentId', '==', student.id).orderBy('year', 'desc').orderBy('term', 'desc').limit(1);
     const snap = await q.get();
@@ -171,12 +156,12 @@ async function generateStudentReportPDF(student, schoolName) {
       schoolName
     });
 
-    // Use pdf-light to generate the PDF
-    const pdfGenerator = new PDFGenerator({
-      format: 'A4',
-      printBackground: true,
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      pdf.create(html, { format: 'A4', printBackground: true }).toBuffer((err, buffer) => {
+        if (err) reject(err);
+        else resolve(buffer);
+      });
     });
-    const pdfBuffer = await pdfGenerator.generate(html);
     return pdfBuffer;
   } catch (err) {
     console.error('PDF generation error:', err);
@@ -184,7 +169,6 @@ async function generateStudentReportPDF(student, schoolName) {
   }
 }
 
-// ---------- HTML template for report card ----------
 function buildReportHtml(data) {
   const { studentName, className, term, year, results, teacherComment, headComment, schoolName } = data;
   const rows = results.map(r => `
@@ -236,7 +220,6 @@ function buildReportHtml(data) {
   </html>`;
 }
 
-// ---------- Grade & comment helpers ----------
 function calculateGrade(marks, form) {
   const num = Number(marks);
   if (isNaN(num)) return '-';
@@ -281,12 +264,10 @@ async function sendText(to, message) {
 }
 
 async function sendDocument(to, buffer, filename) {
-  // 1. Upload media
   const formData = new FormData();
   formData.append('messaging_product', 'whatsapp');
   formData.append('type', 'application/pdf');
-  const blob = new Blob([buffer], { type: 'application/pdf' });
-  formData.append('file', blob, filename);
+  formData.append('file', new Blob([buffer], { type: 'application/pdf' }), filename);
   const mediaRes = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` },
@@ -296,7 +277,6 @@ async function sendDocument(to, buffer, filename) {
   if (!mediaRes.ok) throw new Error(`Media upload failed: ${JSON.stringify(mediaData)}`);
   const mediaId = mediaData.id;
 
-  // 2. Send document message
   const msgUrl = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
   const payload = {
     messaging_product: 'whatsapp',
@@ -323,6 +303,5 @@ async function callWhatsAppAPI(url, payload) {
   console.log('Message sent');
 }
 
-// ---------- Start server ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
