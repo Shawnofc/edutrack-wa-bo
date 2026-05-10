@@ -1,8 +1,6 @@
 const express = require('express');
 const admin = require('firebase-admin');
-const fetch = require('node-fetch');
-const puppeteer = require('puppeteer-core');
-const fs = require('fs');
+const { PDFGenerator } = require('pdf-light');
 const path = require('path');
 require('dotenv').config();
 
@@ -30,41 +28,6 @@ const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 // In‑memory session store (for demo; for production use Redis)
 const sessions = new Map();
-
-// ---------- Helper: Find Chromium executable path ----------
-function getChromiumExecutablePath() {
-  // 1. Use environment variable if provided
-  if (process.env.CHROMIUM_PATH) {
-    return process.env.CHROMIUM_PATH;
-  }
-  // 2. Look for Puppeteer's chrome installation
-  const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
-  const chromeDir = path.join(cacheDir, 'chrome');
-  if (fs.existsSync(chromeDir)) {
-    const revisions = fs.readdirSync(chromeDir);
-    if (revisions.length > 0) {
-      // Get the latest revision (highest number)
-      const latestRevision = revisions.sort().reverse()[0];
-      const chromePath = path.join(chromeDir, latestRevision, 'chrome-linux64', 'chrome');
-      if (fs.existsSync(chromePath)) {
-        return chromePath;
-      }
-    }
-  }
-  // 3. Fallback to common paths
-  const commonPaths = [
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable'
-  ];
-  for (const p of commonPaths) {
-    if (fs.existsSync(p)) {
-      return p;
-    }
-  }
-  throw new Error('Could not find Chromium executable. Please set CHROMIUM_PATH environment variable.');
-}
 
 // ---------- Webhook Verification ----------
 app.get('/webhook', (req, res) => {
@@ -147,7 +110,7 @@ async function handleMessage(waId, text, session) {
     }
 
     // Notify user we are generating
-    await sendText(waId, `🔍 Student found: *${student.name}*\n\n📄 Generating report card... Please wait.`);
+    await sendText(waId, `🔍 Student found: *${student.name}*\n\n📄 Generating report card...`);
 
     // Generate PDF and send
     const pdfBuffer = await generateStudentReportPDF(student, session.schoolName);
@@ -180,7 +143,7 @@ async function findStudentBySchoolAndId(schoolId, studentId) {
   return { id: snap.docs[0].id, ...snap.docs[0].data() };
 }
 
-// ---------- PDF Generation (uses Puppeteer) ----------
+// ---------- PDF Generation (using pdf-light) ----------
 async function generateStudentReportPDF(student, schoolName) {
   try {
     // Fetch the latest report card for this student
@@ -208,18 +171,13 @@ async function generateStudentReportPDF(student, schoolName) {
       schoolName
     });
 
-    const executablePath = getChromiumExecutablePath();
-    console.log(`Launching Chromium at: ${executablePath}`);
-
-    const browser = await puppeteer.launch({
-      executablePath,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    // Use pdf-light to generate the PDF
+    const pdfGenerator = new PDFGenerator({
+      format: 'A4',
+      printBackground: true,
     });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    const pdf = await page.pdf({ format: 'A4', printBackground: true });
-    await browser.close();
-    return pdf;
+    const pdfBuffer = await pdfGenerator.generate(html);
+    return pdfBuffer;
   } catch (err) {
     console.error('PDF generation error:', err);
     return null;
@@ -267,9 +225,7 @@ function buildReportHtml(data) {
         <div><strong>Term:</strong> ${term} – Year: ${year}</div>
       </div>
       <table>
-        <thead>
-          <tr><th>Subject</th><th>Marks</th><th>Grade</th><th>Comment</th></tr>
-        </thead>
+        <thead><tr><th>Subject</th><th>Marks</th><th>Grade</th><th>Comment</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div class="comment-box"><strong>Teacher's Comment:</strong><br/>${teacherComment || '—'}</div>
@@ -329,7 +285,8 @@ async function sendDocument(to, buffer, filename) {
   const formData = new FormData();
   formData.append('messaging_product', 'whatsapp');
   formData.append('type', 'application/pdf');
-  formData.append('file', new Blob([buffer]), filename);
+  const blob = new Blob([buffer], { type: 'application/pdf' });
+  formData.append('file', blob, filename);
   const mediaRes = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` },
