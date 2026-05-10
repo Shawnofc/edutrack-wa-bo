@@ -1,3 +1,4 @@
+
 const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
@@ -264,19 +265,25 @@ async function sendText(to, message) {
 }
 
 async function sendDocument(to, buffer, filename) {
+  // 1. Upload media – messaging_product is required in form data
   const formData = new FormData();
   formData.append('messaging_product', 'whatsapp');
   formData.append('type', 'application/pdf');
   formData.append('file', new Blob([buffer], { type: 'application/pdf' }), filename);
+  
   const mediaRes = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` },
     body: formData
   });
   const mediaData = await mediaRes.json();
-  if (!mediaRes.ok) throw new Error(`Media upload failed: ${JSON.stringify(mediaData)}`);
+  if (!mediaRes.ok) {
+    console.error('Media upload failed:', mediaData);
+    throw new Error(`Media upload failed: ${JSON.stringify(mediaData)}`);
+  }
   const mediaId = mediaData.id;
 
+  // 2. Send document message
   const msgUrl = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
   const payload = {
     messaging_product: 'whatsapp',
