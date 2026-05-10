@@ -1,8 +1,8 @@
-
 const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
 const pdf = require('html-pdf');
+const FormData = require('form-data');
 require('dotenv').config();
 
 // ---------- Firebase initialization ----------
@@ -265,16 +265,19 @@ async function sendText(to, message) {
 }
 
 async function sendDocument(to, buffer, filename) {
-  // 1. Upload media – messaging_product is required in form data
-  const formData = new FormData();
-  formData.append('messaging_product', 'whatsapp');
-  formData.append('type', 'application/pdf');
-  formData.append('file', new Blob([buffer], { type: 'application/pdf' }), filename);
-  
+  // 1. Upload media using form-data
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', 'application/pdf');
+  form.append('file', buffer, { filename });
+
   const mediaRes = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` },
-    body: formData
+    headers: {
+      'Authorization': `Bearer ${ACCESS_TOKEN}`,
+      ...form.getHeaders()  // includes correct Content-Type with boundary
+    },
+    body: form
   });
   const mediaData = await mediaRes.json();
   if (!mediaRes.ok) {
