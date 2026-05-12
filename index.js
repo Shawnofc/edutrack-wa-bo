@@ -1,7 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
-const pdf = require('html-pdf');
+const puppeteer = require('puppeteer');
 const FormData = require('form-data');
 require('dotenv').config();
 
@@ -184,7 +184,7 @@ async function getSubjectAverages(classId, form, term, year) {
   return averages;
 }
 
-// ---------- PDF Generation using html-pdf ----------
+// ---------- PDF Generation using Puppeteer (beautiful report card) ----------
 async function generateReportCardPDF(student, report, schoolId) {
   try {
     const schoolDoc = await db.collection('schools').doc(schoolId).get();
@@ -209,6 +209,7 @@ async function generateReportCardPDF(student, report, schoolId) {
     const overallAverage = results.length ? (totalMarks / results.length).toFixed(2) : 0;
     const totalPossible = results.length * 100;
 
+    // Build HTML exactly like your sample (with TailwindCDN)
     const html = buildReportCardHTML({
       school,
       studentName: student.name,
@@ -227,12 +228,14 @@ async function generateReportCardPDF(student, report, schoolId) {
       level
     });
 
-    const pdfBuffer = await new Promise((resolve, reject) => {
-      pdf.create(html, { format: 'A4', printBackground: true, border: '0.5in' }).toBuffer((err, buffer) => {
-        if (err) reject(err);
-        else resolve(buffer);
-      });
+    // Launch Puppeteer (Render will use the Chrome installed via postinstall)
+    const browser = await puppeteer.launch({
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
+    await browser.close();
     return pdfBuffer;
   } catch (err) {
     console.error('PDF generation error:', err);
@@ -256,7 +259,7 @@ function getGradeAndComment(marks, level) {
     if (num >= 50) return { grade: 'C', comment: 'Pass' };
     if (num >= 40) return { grade: 'D', comment: 'Satisfactory' };
     if (num >= 30) return { grade: 'E', comment: 'Work Hard' };
-    return { grade: 'F', comment: 'Ungraded/Fail' };
+    return { grade: 'F', comment: 'Ungraded' };
   }
 }
 
@@ -265,105 +268,144 @@ function buildReportCardHTML(data) {
 
   let tableRows = '';
   for (const r of results) {
+    const badgeColor = r.grade === 'A' ? 'bg-green-100 text-green-800' :
+                       r.grade === 'B' ? 'bg-blue-100 text-blue-800' :
+                       r.grade === 'C' ? 'bg-yellow-100 text-yellow-800' :
+                       r.grade === 'D' ? 'bg-orange-100 text-orange-800' :
+                       r.grade === 'E' ? 'bg-orange-100 text-orange-800' : 'bg-red-100 text-red-800';
     tableRows += `
-      <tr style="border-bottom:1px solid #e5e7eb;">
-        <td style="padding:8px; border-bottom:1px solid #ddd;">${escapeHtml(r.subject)}</td>
-        <td style="padding:8px; text-align:center; border-bottom:1px solid #ddd;">${r.marks} / 100</td>
-        <td style="padding:8px; text-align:center; border-bottom:1px solid #ddd;">${r.avg}</td>
-        <td style="padding:8px; text-align:center; border-bottom:1px solid #ddd;"><span style="background:${getGradeColor(r.grade)}; color:white; padding:2px 8px; border-radius:20px;">${r.grade}</span></td>
-        <td style="padding:8px; border-bottom:1px solid #ddd; color:gray; font-style:italic;">${r.comment}</td>
+      <tr class="result-row border-b hover:bg-gray-50 transition">
+        <td class="px-2 py-2 border-b text-gray-800 font-medium">${escapeHtml(r.subject)}</td>
+        <td class="px-2 py-2 border-b">${r.marks} / 100</td>
+        <td class="px-2 py-2 border-b">${r.avg}</td>
+        <td class="px-2 py-2 border-b">
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${badgeColor}">${r.grade}</span>
+        </td>
+        <td class="px-2 py-2 border-b text-gray-500 italic">${r.comment}</td>
       </tr>
     `;
   }
 
+  const footerRows = `
+    <tfoot class="bg-gray-50 text-sm">
+      <tr class="border-t">
+        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Total Marks</td>
+        <td class="px-2 py-2 font-semibold text-gray-800">${totalMarks} / ${totalPossible}</td>
+      </tr>
+      <tr class="border-t">
+        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Overall Percentage</td>
+        <td class="px-2 py-2 font-semibold text-gray-800">${overallAverage}%</td>
+      </tr>
+      <tr class="border-t">
+        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Subjects Passed</td>
+        <td class="px-2 py-2 font-semibold text-gray-800">${passed} / ${totalSubjects} (≥50%)</td>
+      </tr>
+    </tfoot>
+  `;
+
   const legendItems = level === 'olevel' 
-    ? 'A=70-100 | B=60-69 | C=50-59 | D=45-49 | E=40-44 | U=0-39'
-    : 'A=75-100 | B=65-74 | C=50-64 | D=40-49 | E=30-39 | F=0-29';
+    ? `<span>A=70-100</span><span>B=60-69</span><span>C=50-59</span><span>D=45-49</span><span>E=40-44</span><span>U=0-39</span>`
+    : `<span>A=75-100</span><span>B=65-74</span><span>C=50-64</span><span>D=40-49</span><span>E=30-39</span><span>F=0-29</span>`;
 
   return `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>EduTrack Report Card</title>
-<style>
-  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; margin: 0; }
-  .container { max-width: 1000px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); overflow: hidden; }
-  .content { padding: 20px; }
-  .school-header { text-align: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 10px; margin-bottom: 20px; }
-  .school-name { font-size: 24px; font-weight: bold; color: #1f2937; }
-  .school-details { font-size: 11px; color: #6b7280; margin-top: 4px; }
-  .student-grid { display: grid; grid-template-columns: repeat(6,1fr); gap: 12px; background: #f9fafb; padding: 12px; border-radius: 8px; margin-bottom: 20px; }
-  .student-item p:first-child { font-size: 11px; color: #6b7280; margin-bottom: 2px; }
-  .student-item p:last-child { font-weight: bold; color: #1f2937; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-  th { text-align: left; padding: 8px; background: #f3f4f6; border: 1px solid #e5e7eb; font-weight: 600; }
-  .comment-box { border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px; margin-bottom: 16px; background: #f9fafb; }
-  .signatures { display: flex; justify-content: space-between; margin-top: 20px; padding-top: 12px; border-top: 1px solid #e5e7eb; }
-  .signature { text-align: center; width: 30%; }
-  .stamp { width: 50px; height: 50px; border: 2px solid #9ca3af; border-radius: 6px; margin: 0 auto; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #6b7280; }
-  .legend { margin-top: 16px; padding-top: 8px; border-top: 1px solid #e5e7eb; font-size: 11px; color: #6b7280; text-align: center; }
-  .footer { text-align: center; font-size: 10px; color: #9ca3af; margin-top: 12px; }
-  @media print {
-    body { background: white; padding: 0; }
-    .container { box-shadow: none; }
-  }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>EduTrack | Student Report Card</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @media print {
+            body * { visibility: hidden; }
+            .report-print-area, .report-print-area * { visibility: visible; }
+            .report-print-area { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; box-shadow: none; }
+            .no-print { display: none !important; }
+            table, tr, td, th { page-break-inside: avoid; }
+        }
+        .result-row:hover { background-color: #f9fafb; transition: 0.1s; }
+    </style>
 </head>
-<body>
-<div class="container">
-  <div class="content">
-    <div class="school-header">
-      <div class="school-name">${escapeHtml(school.name)}</div>
-      ${school.address ? `<div class="school-details">${escapeHtml(school.address)}</div>` : ''}
-      ${school.phone ? `<div class="school-details">${escapeHtml(school.phone)}</div>` : ''}
-      ${school.email ? `<div class="school-details">${escapeHtml(school.email)}</div>` : ''}
+<body class="bg-gray-100 py-6 px-4 font-sans antialiased">
+    <div class="max-w-5xl mx-auto">
+        <div class="report-print-area">
+            <div class="bg-white rounded-xl shadow-lg overflow-hidden print:shadow-none border border-gray-100">
+                <div class="p-5 md:p-6 print:p-4">
+                    <!-- School Header -->
+                    <div class="text-center border-b border-gray-200 pb-3 mb-4">
+                        <h2 class="text-2xl font-extrabold text-gray-800 tracking-tight">${escapeHtml(school.name)}</h2>
+                        ${school.address ? `<p class="text-gray-600 text-xs mt-0.5">${escapeHtml(school.address)}</p>` : ''}
+                        ${school.phone ? `<p class="text-gray-500 text-xs">${escapeHtml(school.phone)}</p>` : ''}
+                        ${school.email ? `<p class="text-gray-500 text-xs">${escapeHtml(school.email)}</p>` : ''}
+                    </div>
+
+                    <!-- Student Details Grid (6 columns) -->
+                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 bg-gray-50 p-3 rounded-lg mb-5 text-sm">
+                        <div><p class="text-xs text-gray-500">Student Name</p><p class="font-bold text-gray-800">${escapeHtml(studentName)}</p></div>
+                        <div><p class="text-xs text-gray-500">Class</p><p class="font-bold text-gray-800">${escapeHtml(studentClass)}</p></div>
+                        <div><p class="text-xs text-gray-500">Student ID</p><p class="font-bold text-gray-800">${escapeHtml(studentId)}</p></div>
+                        <div><p class="text-xs text-gray-500">Term</p><p class="font-bold text-gray-800">${term}</p></div>
+                        <div><p class="text-xs text-gray-500">Year</p><p class="font-bold text-gray-800">${year}</p></div>
+                        <div><p class="text-xs text-gray-500">Overall Avg</p><p class="font-bold text-gray-800">${overallAverage}%</p></div>
+                    </div>
+
+                    <!-- Results Table -->
+                    <div class="overflow-x-auto mb-5">
+                        <table class="min-w-full text-xs border border-gray-200 rounded-md">
+                            <thead class="bg-gray-100">
+                                <tr>
+                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Subject</th>
+                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Marks</th>
+                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Class Avg</th>
+                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Grade</th>
+                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Comment</th>
+                                </tr>
+                            </thead>
+                            <tbody>${tableRows}</tbody>
+                            ${footerRows}
+                        </table>
+                    </div>
+
+                    <!-- Comments -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 text-sm">
+                        <div>
+                            <p class="text-xs font-semibold text-gray-600 uppercase tracking-wide">Teacher's Comment</p>
+                            <div class="border border-gray-200 rounded-lg p-2.5 min-h-[70px] bg-gray-50 text-gray-700 leading-relaxed">${escapeHtml(teacherComment) || '—'}</div>
+                        </div>
+                        <div>
+                            <p class="text-xs font-semibold text-gray-600 uppercase tracking-wide">Head's Comment</p>
+                            <div class="border border-gray-200 rounded-lg p-2.5 min-h-[70px] bg-gray-50 text-gray-700 leading-relaxed">${escapeHtml(headComment) || '—'}</div>
+                        </div>
+                    </div>
+
+                    <!-- Signatures & Stamp -->
+                    <div class="flex flex-wrap justify-between items-end mt-5 pt-3 border-t border-gray-200 text-xs">
+                        <div class="text-center w-28">
+                            <p class="text-gray-500 text-xs">Teacher's Signature</p>
+                            <div class="mt-1 w-full border-b border-gray-400 h-6"></div>
+                        </div>
+                        <div class="text-center w-28">
+                            <p class="text-gray-500 text-xs">Head's Signature</p>
+                            <div class="mt-1 w-full border-b border-gray-400 h-6"></div>
+                        </div>
+                        <div class="text-center">
+                            <div class="w-12 h-12 border-2 border-gray-400 rounded-md mx-auto flex items-center justify-center text-gray-500 text-xs font-mono">STAMP</div>
+                            <p class="text-xs text-gray-500 mt-1">Official Stamp</p>
+                        </div>
+                    </div>
+
+                    <!-- Grading Legend -->
+                    <div class="mt-4 pt-2 border-t border-gray-200 text-xs text-gray-500 flex flex-wrap gap-3 justify-center">
+                        ${legendItems}
+                    </div>
+                    <div class="text-center text-gray-400 text-[11px] mt-3">
+                        Generated on ${new Date().toLocaleDateString()} – EduTrack
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-
-    <div class="student-grid">
-      <div class="student-item"><p>Student Name</p><p>${escapeHtml(studentName)}</p></div>
-      <div class="student-item"><p>Class</p><p>${escapeHtml(studentClass)}</p></div>
-      <div class="student-item"><p>Student ID</p><p>${escapeHtml(studentId)}</p></div>
-      <div class="student-item"><p>Term</p><p>${term}</p></div>
-      <div class="student-item"><p>Year</p><p>${year}</p></div>
-      <div class="student-item"><p>Overall Avg</p><p>${overallAverage}%</p></div>
-    </div>
-
-    <td>
-      <thead><tr><th>Subject</th><th>Marks</th><th>Class Avg</th><th>Grade</th><th>Comment</th></tr></thead>
-      <tbody>${tableRows}</tbody>
-      <tfoot>
-        <tr style="background:#f9fafb;"><td colspan="4" style="text-align:right; font-weight:bold;">Total Marks</td><td><strong>${totalMarks} / ${totalPossible}</strong></td></tr>
-        <tr style="background:#f9fafb;"><td colspan="4" style="text-align:right; font-weight:bold;">Overall Percentage</td><td><strong>${overallAverage}%</strong></td></tr>
-        <tr style="background:#f9fafb;"><td colspan="4" style="text-align:right; font-weight:bold;">Subjects Passed</td><td><strong>${passed} / ${totalSubjects} (≥50%)</strong></td></tr>
-      </tfoot>
-    </table>
-
-    <div class="comment-box"><strong>Teacher's Comment</strong><br/>${escapeHtml(teacherComment) || '—'}</div>
-    <div class="comment-box"><strong>Head's Comment</strong><br/>${escapeHtml(headComment) || '—'}</div>
-
-    <div class="signatures">
-      <div class="signature">Teacher's Signature<br/><div style="border-bottom:1px solid #9ca3af; margin-top:5px; height:30px;"></div></div>
-      <div class="signature">Head's Signature<br/><div style="border-bottom:1px solid #9ca3af; margin-top:5px; height:30px;"></div></div>
-      <div class="signature"><div class="stamp">STAMP</div><div style="font-size:10px;">Official Stamp</div></div>
-    </div>
-
-    <div class="legend">Grading: ${legendItems}</div>
-    <div class="footer">Generated on ${new Date().toLocaleDateString()} – EduTrack</div>
-  </div>
-</div>
 </body>
 </html>`;
-}
-
-function getGradeColor(grade) {
-  switch(grade) {
-    case 'A': return '#22c55e';
-    case 'B': return '#3b82f6';
-    case 'C': return '#eab308';
-    case 'D': return '#f97316';
-    case 'E': return '#f97316';
-    default: return '#ef4444';
-  }
 }
 
 function escapeHtml(str) {
