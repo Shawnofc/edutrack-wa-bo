@@ -1,7 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
-const puppeteer = require('puppeteer');
+const pdf = require('html-pdf');
 const FormData = require('form-data');
 require('dotenv').config();
 
@@ -184,7 +184,7 @@ async function getSubjectAverages(classId, form, term, year) {
   return averages;
 }
 
-// ---------- PDF Generation using Puppeteer (beautiful report card) ----------
+// ---------- PDF Generation (html-pdf, professional, one page) ----------
 async function generateReportCardPDF(student, report, schoolId) {
   try {
     const schoolDoc = await db.collection('schools').doc(schoolId).get();
@@ -209,7 +209,7 @@ async function generateReportCardPDF(student, report, schoolId) {
     const overallAverage = results.length ? (totalMarks / results.length).toFixed(2) : 0;
     const totalPossible = results.length * 100;
 
-    // Build HTML exactly like your sample (with TailwindCDN)
+    // Build compact, A4-friendly HTML
     const html = buildReportCardHTML({
       school,
       studentName: student.name,
@@ -228,14 +228,12 @@ async function generateReportCardPDF(student, report, schoolId) {
       level
     });
 
-    // Launch Puppeteer (Render will use the Chrome installed via postinstall)
-    const browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      pdf.create(html, { format: 'A4', printBackground: true, border: '0.4in' }).toBuffer((err, buffer) => {
+        if (err) reject(err);
+        else resolve(buffer);
+      });
     });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
-    await browser.close();
     return pdfBuffer;
   } catch (err) {
     console.error('PDF generation error:', err);
@@ -268,142 +266,180 @@ function buildReportCardHTML(data) {
 
   let tableRows = '';
   for (const r of results) {
-    const badgeColor = r.grade === 'A' ? 'bg-green-100 text-green-800' :
-                       r.grade === 'B' ? 'bg-blue-100 text-blue-800' :
-                       r.grade === 'C' ? 'bg-yellow-100 text-yellow-800' :
-                       r.grade === 'D' ? 'bg-orange-100 text-orange-800' :
-                       r.grade === 'E' ? 'bg-orange-100 text-orange-800' : 'bg-red-100 text-red-800';
     tableRows += `
-      <tr class="result-row border-b hover:bg-gray-50 transition">
-        <td class="px-2 py-2 border-b text-gray-800 font-medium">${escapeHtml(r.subject)}</td>
-        <td class="px-2 py-2 border-b">${r.marks} / 100</td>
-        <td class="px-2 py-2 border-b">${r.avg}</td>
-        <td class="px-2 py-2 border-b">
-          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${badgeColor}">${r.grade}</span>
-        </td>
-        <td class="px-2 py-2 border-b text-gray-500 italic">${r.comment}</td>
+      <tr>
+        <td style="border:1px solid #ddd; padding:4px; font-size:10px;">${escapeHtml(r.subject)}</td>
+        <td style="border:1px solid #ddd; padding:4px; text-align:center; font-size:10px;">${r.marks} / 100</td>
+        <td style="border:1px solid #ddd; padding:4px; text-align:center; font-size:10px;">${r.avg}</td>
+        <td style="border:1px solid #ddd; padding:4px; text-align:center; font-size:10px;"><strong>${r.grade}</strong></td>
+        <td style="border:1px solid #ddd; padding:4px; font-size:10px;">${r.comment}</td>
       </tr>
     `;
   }
 
-  const footerRows = `
-    <tfoot class="bg-gray-50 text-sm">
-      <tr class="border-t">
-        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Total Marks</td>
-        <td class="px-2 py-2 font-semibold text-gray-800">${totalMarks} / ${totalPossible}</td>
-      </tr>
-      <tr class="border-t">
-        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Overall Percentage</td>
-        <td class="px-2 py-2 font-semibold text-gray-800">${overallAverage}%</td>
-      </tr>
-      <tr class="border-t">
-        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Subjects Passed</td>
-        <td class="px-2 py-2 font-semibold text-gray-800">${passed} / ${totalSubjects} (≥50%)</td>
-      </tr>
-    </tfoot>
-  `;
-
-  const legendItems = level === 'olevel' 
-    ? `<span>A=70-100</span><span>B=60-69</span><span>C=50-59</span><span>D=45-49</span><span>E=40-44</span><span>U=0-39</span>`
-    : `<span>A=75-100</span><span>B=65-74</span><span>C=50-64</span><span>D=40-49</span><span>E=30-39</span><span>F=0-29</span>`;
+  const legend = level === 'olevel'
+    ? 'A=70-100 | B=60-69 | C=50-59 | D=45-49 | E=40-44 | U=0-39'
+    : 'A=75-100 | B=65-74 | C=50-64 | D=40-49 | E=30-39 | F=0-29';
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>EduTrack | Student Report Card</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        @media print {
-            body * { visibility: hidden; }
-            .report-print-area, .report-print-area * { visibility: visible; }
-            .report-print-area { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; box-shadow: none; }
-            .no-print { display: none !important; }
-            table, tr, td, th { page-break-inside: avoid; }
-        }
-        .result-row:hover { background-color: #f9fafb; transition: 0.1s; }
-    </style>
+<meta charset="UTF-8">
+<title>EduTrack Report Card</title>
+<style>
+  body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: 0;
+    padding: 0;
+    font-size: 10px;
+  }
+  .container {
+    max-width: 800px;
+    margin: 0 auto;
+    background: white;
+    padding: 10px;
+  }
+  .header {
+    text-align: center;
+    border-bottom: 2px solid #4f46e5;
+    padding-bottom: 6px;
+    margin-bottom: 12px;
+  }
+  .school-name {
+    font-size: 18px;
+    font-weight: bold;
+    color: #1f2937;
+  }
+  .school-details {
+    font-size: 9px;
+    color: #6b7280;
+  }
+  .student-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 6px;
+    background: #f9fafb;
+    padding: 8px;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 9px;
+  }
+  .student-item p:first-child {
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 12px;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 4px;
+    font-size: 9px;
+  }
+  th {
+    background-color: #f3f4f6;
+    text-align: left;
+  }
+  .comment-box {
+    margin: 8px 0;
+    padding: 6px;
+    background: #f9fafb;
+    border-left: 3px solid #4f46e5;
+    font-size: 9px;
+  }
+  .signatures {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 15px;
+    padding-top: 8px;
+    border-top: 1px solid #ddd;
+    font-size: 8px;
+  }
+  .signature {
+    text-align: center;
+    width: 30%;
+  }
+  .stamp {
+    width: 45px;
+    height: 45px;
+    border: 1px solid #9ca3af;
+    border-radius: 4px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8px;
+  }
+  .legend {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid #ddd;
+    font-size: 8px;
+    text-align: center;
+    color: #6b7280;
+  }
+  .footer-note {
+    margin-top: 12px;
+    text-align: center;
+    font-size: 7px;
+    color: #9ca3af;
+    background: #fef3c7;
+    padding: 4px;
+    border-radius: 4px;
+  }
+  .footer-note a {
+    color: #4f46e5;
+    text-decoration: none;
+  }
+</style>
 </head>
-<body class="bg-gray-100 py-6 px-4 font-sans antialiased">
-    <div class="max-w-5xl mx-auto">
-        <div class="report-print-area">
-            <div class="bg-white rounded-xl shadow-lg overflow-hidden print:shadow-none border border-gray-100">
-                <div class="p-5 md:p-6 print:p-4">
-                    <!-- School Header -->
-                    <div class="text-center border-b border-gray-200 pb-3 mb-4">
-                        <h2 class="text-2xl font-extrabold text-gray-800 tracking-tight">${escapeHtml(school.name)}</h2>
-                        ${school.address ? `<p class="text-gray-600 text-xs mt-0.5">${escapeHtml(school.address)}</p>` : ''}
-                        ${school.phone ? `<p class="text-gray-500 text-xs">${escapeHtml(school.phone)}</p>` : ''}
-                        ${school.email ? `<p class="text-gray-500 text-xs">${escapeHtml(school.email)}</p>` : ''}
-                    </div>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="school-name">${escapeHtml(school.name)}</div>
+    ${school.address ? `<div class="school-details">${escapeHtml(school.address)}</div>` : ''}
+    ${school.phone ? `<div class="school-details">${escapeHtml(school.phone)}</div>` : ''}
+    ${school.email ? `<div class="school-details">${escapeHtml(school.email)}</div>` : ''}
+  </div>
 
-                    <!-- Student Details Grid (6 columns) -->
-                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 bg-gray-50 p-3 rounded-lg mb-5 text-sm">
-                        <div><p class="text-xs text-gray-500">Student Name</p><p class="font-bold text-gray-800">${escapeHtml(studentName)}</p></div>
-                        <div><p class="text-xs text-gray-500">Class</p><p class="font-bold text-gray-800">${escapeHtml(studentClass)}</p></div>
-                        <div><p class="text-xs text-gray-500">Student ID</p><p class="font-bold text-gray-800">${escapeHtml(studentId)}</p></div>
-                        <div><p class="text-xs text-gray-500">Term</p><p class="font-bold text-gray-800">${term}</p></div>
-                        <div><p class="text-xs text-gray-500">Year</p><p class="font-bold text-gray-800">${year}</p></div>
-                        <div><p class="text-xs text-gray-500">Overall Avg</p><p class="font-bold text-gray-800">${overallAverage}%</p></div>
-                    </div>
+  <div class="student-grid">
+    <div class="student-item"><p>Student Name</p><p>${escapeHtml(studentName)}</p></div>
+    <div class="student-item"><p>Class</p><p>${escapeHtml(studentClass)}</p></div>
+    <div class="student-item"><p>Student ID</p><p>${escapeHtml(studentId)}</p></div>
+    <div class="student-item"><p>Term</p><p>${term}</p></div>
+    <div class="student-item"><p>Year</p><p>${year}</p></div>
+    <div class="student-item"><p>Overall Avg</p><p>${overallAverage}%</p></div>
+  </div>
 
-                    <!-- Results Table -->
-                    <div class="overflow-x-auto mb-5">
-                        <table class="min-w-full text-xs border border-gray-200 rounded-md">
-                            <thead class="bg-gray-100">
-                                <tr>
-                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Subject</th>
-                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Marks</th>
-                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Class Avg</th>
-                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Grade</th>
-                                    <th class="px-2 py-2 text-left font-semibold text-gray-700">Comment</th>
-                                </tr>
-                            </thead>
-                            <tbody>${tableRows}</tbody>
-                            ${footerRows}
-                        </table>
-                    </div>
+  <table>
+    <thead>
+      <tr><th>Subject</th><th>Marks</th><th>Class Avg</th><th>Grade</th><th>Comment</th></tr>
+    </thead>
+    <tbody>${tableRows}</tbody>
+    <tfoot>
+      <tr><td colspan="4" style="text-align:right;"><strong>Total Marks:</strong></td><td><strong>${totalMarks} / ${totalPossible}</strong></td></tr>
+      <tr><td colspan="4" style="text-align:right;"><strong>Overall Percentage:</strong></td><td><strong>${overallAverage}%</strong></td></tr>
+      <tr><td colspan="4" style="text-align:right;"><strong>Subjects Passed (≥50%):</strong></td><td><strong>${passed} / ${totalSubjects}</strong></td></tr>
+    </tfoot>
+  </table>
 
-                    <!-- Comments -->
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 text-sm">
-                        <div>
-                            <p class="text-xs font-semibold text-gray-600 uppercase tracking-wide">Teacher's Comment</p>
-                            <div class="border border-gray-200 rounded-lg p-2.5 min-h-[70px] bg-gray-50 text-gray-700 leading-relaxed">${escapeHtml(teacherComment) || '—'}</div>
-                        </div>
-                        <div>
-                            <p class="text-xs font-semibold text-gray-600 uppercase tracking-wide">Head's Comment</p>
-                            <div class="border border-gray-200 rounded-lg p-2.5 min-h-[70px] bg-gray-50 text-gray-700 leading-relaxed">${escapeHtml(headComment) || '—'}</div>
-                        </div>
-                    </div>
+  <div class="comment-box"><strong>Teacher's Comment</strong><br/>${escapeHtml(teacherComment) || '—'}</div>
+  <div class="comment-box"><strong>Head's Comment</strong><br/>${escapeHtml(headComment) || '—'}</div>
 
-                    <!-- Signatures & Stamp -->
-                    <div class="flex flex-wrap justify-between items-end mt-5 pt-3 border-t border-gray-200 text-xs">
-                        <div class="text-center w-28">
-                            <p class="text-gray-500 text-xs">Teacher's Signature</p>
-                            <div class="mt-1 w-full border-b border-gray-400 h-6"></div>
-                        </div>
-                        <div class="text-center w-28">
-                            <p class="text-gray-500 text-xs">Head's Signature</p>
-                            <div class="mt-1 w-full border-b border-gray-400 h-6"></div>
-                        </div>
-                        <div class="text-center">
-                            <div class="w-12 h-12 border-2 border-gray-400 rounded-md mx-auto flex items-center justify-center text-gray-500 text-xs font-mono">STAMP</div>
-                            <p class="text-xs text-gray-500 mt-1">Official Stamp</p>
-                        </div>
-                    </div>
+  <div class="signatures">
+    <div class="signature">Teacher's Signature<br/><div style="border-bottom:1px solid #000; margin-top:5px; height:25px;"></div></div>
+    <div class="signature">Head's Signature<br/><div style="border-bottom:1px solid #000; margin-top:5px; height:25px;"></div></div>
+    <div class="signature"><div class="stamp">STAMP</div><div>Official Stamp</div></div>
+  </div>
 
-                    <!-- Grading Legend -->
-                    <div class="mt-4 pt-2 border-t border-gray-200 text-xs text-gray-500 flex flex-wrap gap-3 justify-center">
-                        ${legendItems}
-                    </div>
-                    <div class="text-center text-gray-400 text-[11px] mt-3">
-                        Generated on ${new Date().toLocaleDateString()} – EduTrack
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+  <div class="legend">Grading System: ${legend}</div>
+  <div class="footer-note">
+    📄 This is a digital copy. To download the original report card, please log in to your EduTrack account at 
+    <a href="https://edutrack4.netlify.app">https://edutrack4.netlify.app</a>
+  </div>
+</div>
 </body>
 </html>`;
 }
@@ -453,5 +489,6 @@ async function callWhatsAppAPI(url, payload) {
   console.log('Message sent');
 }
 
+// ---------- Start server ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
