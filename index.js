@@ -421,7 +421,7 @@ function buildReportCardHTML(data) {
     <tfoot>
       <tr><td colspan="4" style="text-align:right;"><strong>Total Marks:</strong></td><td><strong>${totalMarks} / ${totalPossible}</strong></td></tr>
       <tr><td colspan="4" style="text-align:right;"><strong>Overall Percentage:</strong></td><td><strong>${overallAverage}%</strong></td></tr>
-      <tr><td colspan="4" style="text-align:right;"><strong>Subjects Passed (≥50%):</strong></td><td><strong>${passed} / ${totalSubjects}</strong></td></tr>
+      <tr><td colspan="4" style="text-align:right;"><strong>Subjects Passed</strong></td><td><strong>${passed} / ${totalSubjects}</strong></td></tr>
     </tfoot>
   </table>
 
@@ -475,7 +475,7 @@ async function sendDocument(to, buffer, filename) {
   if (!mediaRes.ok) throw new Error(`Media upload failed: ${JSON.stringify(mediaData)}`);
   const mediaId = mediaData.id;
   const msgUrl = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
-  const payload = { messaging_product: 'whatsapp', to, type: 'document', document: { id: mediaId, filename, caption: '📄 Your report card' } };
+  const payload = { messaging_product: 'whatsapp', to, type: 'document', document: { id: mediaId, filename, caption: '📄 This is a digital copy. To download the original report card, please log in to your EduTrack account at https:/edutrack4.netlify.app' } };
   await callWhatsAppAPI(msgUrl, payload);
 }
 
