@@ -1,7 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
-const pdf = require('html-pdf');
+const puppeteer = require('puppeteer-core');
 const FormData = require('form-data');
 require('dotenv').config();
 
@@ -29,6 +29,22 @@ const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 const sessions = new Map();
 
+// ---------- Helper: Find Chromium executable path (for Render) ----------
+function getChromiumPath() {
+  const possiblePaths = [
+    process.env.CHROMIUM_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome'
+  ].filter(Boolean);
+  for (const p of possiblePaths) {
+    const { existsSync } = require('fs');
+    if (existsSync(p)) return p;
+  }
+  throw new Error('No Chromium executable found. Please set CHROMIUM_PATH environment variable on Render.');
+}
+
 // ---------- Webhook Verification ----------
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -52,10 +68,9 @@ app.post('/webhook', async (req, res) => {
   let text = message.text.body.trim();
   console.log(`[${from}] says: ${text}`);
 
-  // Handle logout in any step
   if (text.toLowerCase() === 'log out') {
     sessions.delete(from);
-    await sendText(from, '🔒 You have been logged out.\n\nSend "Hi" to start over. 👋');
+    await sendText(from, '🔒 Logged out.\n\nSend "Hi" to start over.');
     return;
   }
 
@@ -63,28 +78,26 @@ app.post('/webhook', async (req, res) => {
   await handleMessage(from, text, session);
 });
 
-// ---------- Conversation Logic ----------
+// ---------- Conversation Logic (unchanged) ----------
 async function handleMessage(waId, text, session) {
-  // Step 1: Show school list
   if (session.step === 'start') {
     const schools = await getAllSchools();
     if (schools.length === 0) {
-      await sendText(waId, '❌ No schools found in the system. Please contact support.');
+      await sendText(waId, '❌ No schools found.');
       return;
     }
     const schoolList = schools.map((s, idx) => `${idx+1}. ${s.name}`).join('\n');
-    await sendText(waId, `👋 *Welcome to EduTrak Bot!*\n\nI help students download report cards instantly.\n\n📚 *Registered Schools:*\n${schoolList}\n\nPlease select your school by typing the number.\n\n_Example: 1_\n\n━━━━━━━━━━━\n_To log out at any time, type "log out"_`);
+    await sendText(waId, `👋 *EduTrak Bot*\n\nSelect your school by typing the number:\n\n${schoolList}\n\n_Type "log out" to exit._`);
     session.step = 'awaiting_school';
     sessions.set(waId, session);
     return;
   }
 
-  // Step 2: User selects school
   if (session.step === 'awaiting_school') {
     const selectedIndex = parseInt(text) - 1;
     const schools = await getAllSchools();
     if (isNaN(selectedIndex) || selectedIndex < 0 || selectedIndex >= schools.length) {
-      await sendText(waId, '❌ Invalid number. Please type the number corresponding to your school.');
+      await sendText(waId, '❌ Invalid number. Try again.');
       return;
     }
     const selectedSchool = schools[selectedIndex];
@@ -92,318 +105,331 @@ async function handleMessage(waId, text, session) {
     session.schoolName = selectedSchool.name;
     session.step = 'awaiting_student_id';
     sessions.set(waId, session);
-    await sendText(waId, `✅ *School Selected:* ${selectedSchool.name}\n\nPlease enter your Student ID.\n\n_Format: STD-123456_\n\n_Example: STD-123456_\n\n━━━━━━━━━━━\n_To log out, type "log out"_`);
+    await sendText(waId, `✅ *${selectedSchool.name}*\n\nEnter your Student ID.\n_Format: STD-123456_\n\n_Type "log out" to exit._`);
     return;
   }
 
-  // Step 3: User provides Student ID
   if (session.step === 'awaiting_student_id') {
     const studentIdPattern = /^STD-\d{6}$/i;
     if (!studentIdPattern.test(text)) {
-      await sendText(waId, '❌ Invalid Student ID format. Use STD- followed by 6 digits (e.g., STD-123456).');
+      await sendText(waId, '❌ Invalid ID. Use STD-123456.');
       return;
     }
-
     const studentId = text.toUpperCase();
     const student = await findStudentBySchoolAndId(session.schoolId, studentId);
     if (!student) {
-      await sendText(waId, `❌ Student ID *${studentId}* not found in *${session.schoolName}*. Please check and try again.`);
+      await sendText(waId, `❌ Student ID ${studentId} not found in ${session.schoolName}.`);
       return;
     }
-
-    // Fetch all report cards for this student, sorted by year desc, term desc
     const reports = await getAllReportsForStudent(student.id);
-    if (!reports || reports.length === 0) {
-      await sendText(waId, `🔍 Student found: *${student.name}*\n\n❌ No report cards available for this student. Please contact your school.`);
+    if (!reports.length) {
+      await sendText(waId, `🔍 Student found: *${student.name}*\n\n❌ No report cards available.`);
       sessions.delete(waId);
       return;
     }
-
     session.student = student;
     session.reports = reports;
     session.step = 'awaiting_report_selection';
     sessions.set(waId, session);
-
-    // Build report list message
-    let reportList = '';
-    reports.forEach((r, idx) => {
-      reportList += `${idx+1}. ${r.form} - Term ${r.term} - ${r.year}\n`;
-    });
-    const msg = `🔍 *Student Found:* ${student.name}\n📚 *Class:* ${student.classId || 'Not assigned'}\n\n📄 *Available Report Cards:*\n${reportList}\n\nPlease select the report card you want to download by typing the number.\n\n_Example: 5_\n\n━━━━━━━━━━━\n_To log out, type "log out"_`;
-    await sendText(waId, msg);
+    let list = '';
+    reports.forEach((r, i) => { list += `${i+1}. ${r.form} - Term ${r.term} - ${r.year}\n`; });
+    await sendText(waId, `✅ *${student.name}*\n\n📄 Available reports:\n${list}\n\nType the number of the report you want.`);
     return;
   }
 
-  // Step 4: User selects a report
   if (session.step === 'awaiting_report_selection') {
-    const selectedIndex = parseInt(text) - 1;
-    if (isNaN(selectedIndex) || selectedIndex < 0 || selectedIndex >= session.reports.length) {
-      await sendText(waId, '❌ Invalid number. Please type the number of the report you want.');
+    const idx = parseInt(text) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= session.reports.length) {
+      await sendText(waId, '❌ Invalid number. Try again.');
       return;
     }
-
-    const selectedReport = session.reports[selectedIndex];
-    await sendText(waId, '⏳ *Downloading report card, please wait...*');
-
-    // Generate PDF matching the React ReportCard design
-    const pdfBuffer = await generateReportCardPDF(session.student, selectedReport, session.schoolId, session.schoolName);
+    const report = session.reports[idx];
+    await sendText(waId, '⏳ Generating report card...');
+    const pdfBuffer = await generateReportCardPDF(session.student, report, session.schoolId, session.schoolName);
     if (!pdfBuffer) {
-      await sendText(waId, '❌ Failed to generate report card. Please try again later.');
+      await sendText(waId, '❌ Failed to generate PDF. Try again later.');
       return;
     }
-
-    await sendDocument(waId, pdfBuffer, `Report_${session.student.name.replace(/\s/g, '')}_${selectedReport.form}_Term${selectedReport.term}_${selectedReport.year}.pdf`);
-
-    // End session
+    await sendDocument(waId, pdfBuffer, `Report_${session.student.name.replace(/\s/g, '')}_${report.form}_Term${report.term}_${report.year}.pdf`);
     sessions.delete(waId);
-    await sendText(waId, '✅ *Report card sent successfully!*\n\nIf you need another report, send "Hi" to start over.\n\n━━━━━━━━━━━\n_To log out, type "log out"_');
+    await sendText(waId, '✅ Report sent! Send "Hi" for another.');
     return;
   }
 }
 
-// ---------- Helper Functions ----------
+// ---------- Firestore Helpers (unchanged) ----------
 async function getAllSchools() {
   const snap = await db.collection('schools').get();
   return snap.docs.map(doc => ({ id: doc.id, name: doc.data().name }));
 }
 
 async function findStudentBySchoolAndId(schoolId, studentId) {
-  const studentsRef = db.collection('students');
-  const q = studentsRef.where('schoolId', '==', schoolId).where('studentId', '==', studentId);
+  const q = db.collection('students').where('schoolId', '==', schoolId).where('studentId', '==', studentId);
   const snap = await q.get();
   if (snap.empty) return null;
-  const student = snap.docs[0].data();
-  student.id = snap.docs[0].id;
-  return student;
+  const data = snap.docs[0].data();
+  data.id = snap.docs[0].id;
+  return data;
 }
 
 async function getAllReportsForStudent(studentId) {
-  const reportsRef = db.collection('reports');
-  const q = reportsRef.where('studentId', '==', studentId).orderBy('year', 'desc').orderBy('term', 'desc');
-  const snap = await q.get();
+  const snap = await db.collection('reports').where('studentId', '==', studentId).orderBy('year', 'desc').orderBy('term', 'desc').get();
   return snap.docs.map(doc => doc.data());
 }
 
-// Compute subject averages for a given class, form, term, year
+// ---------- Subject Averages (for "Class Avg" column) ----------
 async function getSubjectAverages(classId, form, term, year) {
-  // Find all students in this class
-  const studentsSnap = await db.collection('students').where('classId', '==', classId).get();
-  const studentIds = studentsSnap.docs.map(doc => doc.id);
-  if (studentIds.length === 0) return {};
-
-  // Find all results for those students, same form, term, year
+  const students = await db.collection('students').where('classId', '==', classId).get();
+  const studentIds = students.docs.map(d => d.id);
+  if (!studentIds.length) return {};
   const resultsSnap = await db.collection('results')
     .where('studentId', 'in', studentIds)
     .where('form', '==', form)
     .where('term', '==', term)
     .where('year', '==', year)
     .get();
-
-  const subjectSums = {};
-  const subjectCounts = {};
+  const sums = {}, counts = {};
   resultsSnap.docs.forEach(doc => {
-    const data = doc.data();
-    const subj = data.subjectId;
-    const marks = data.marksObtained;
-    if (!subjectSums[subj]) { subjectSums[subj] = 0; subjectCounts[subj] = 0; }
-    subjectSums[subj] += marks;
-    subjectCounts[subj] += 1;
+    const { subjectId, marksObtained } = doc.data();
+    if (!sums[subjectId]) sums[subjectId] = 0, counts[subjectId] = 0;
+    sums[subjectId] += marksObtained;
+    counts[subjectId]++;
   });
   const averages = {};
-  Object.keys(subjectSums).forEach(subj => {
-    averages[subj] = (subjectSums[subj] / subjectCounts[subj]).toFixed(2);
-  });
+  Object.keys(sums).forEach(subject => { averages[subject] = (sums[subject] / counts[subject]).toFixed(2); });
   return averages;
 }
 
-// Generate PDF that looks exactly like the React ReportCard component
+// ---------- PDF Generation (using Puppeteer with exact HTML/CSS) ----------
 async function generateReportCardPDF(student, report, schoolId, schoolName) {
   try {
-    // Fetch school details (address, phone, email)
-    let schoolDetails = { name: schoolName, address: '', phone: '', email: '' };
+    // Fetch school details
     const schoolDoc = await db.collection('schools').doc(schoolId).get();
-    if (schoolDoc.exists) {
-      const data = schoolDoc.data();
-      schoolDetails = { name: data.name || schoolName, address: data.address || '', phone: data.phone || '', email: data.email || '' };
-    }
+    const school = schoolDoc.exists ? schoolDoc.data() : { name: schoolName, address: '', phone: '', email: '' };
 
+    // Build results array with class averages
     const form = report.form;
     const term = report.term;
     const year = report.year;
     const subjects = report.subjects || [];
     const results = subjects.map(sub => ({ subject: sub.name, marks: sub.marks }));
+    const classAverages = await getSubjectAverages(student.classId, form, term, year);
 
-    // Compute subject averages for the class
-    let subjectAverages = {};
-    if (student.classId) {
-      subjectAverages = await getSubjectAverages(student.classId, form, term, year);
-    }
-
-    // Compute overall totals and passed subjects
-    let totalMarks = 0;
-    let passedCount = 0;
-    const subjectResults = results.map(r => {
+    // Compute grading and stats
+    const level = form?.includes('Form 5') || form?.includes('Form 6') ? 'alevel' : 'olevel';
+    let totalMarks = 0, passed = 0;
+    const detailedResults = results.map(r => {
       totalMarks += r.marks;
-      if (r.marks > 50) passedCount++;
-      const avg = subjectAverages[r.subject] || 'N/A';
-      const { grade, comment } = getGradeAndComment(r.marks, form);
-      return { ...r, avg, grade, comment };
+      if (r.marks >= 50) passed++;
+      const { grade, comment } = getGradeAndComment(r.marks, level);
+      const avg = classAverages[r.subject] || 'N/A';
+      return { ...r, grade, comment, avg };
     });
-    const overallAverage = (totalMarks / results.length).toFixed(2);
+    const overallAverage = results.length ? (totalMarks / results.length).toFixed(2) : 0;
     const totalPossible = results.length * 100;
 
-    // Build HTML identical to React ReportCard
-    const html = buildReportCardHTML({
-      school: schoolDetails,
-      student: { name: student.name, class: form, studentId: student.studentId },
+    // Build HTML exactly matching the sample
+    const html = buildReportHTML({
+      school,
+      studentName: student.name,
+      studentClass: form,
+      studentId: student.studentId,
       term,
       year,
-      results: subjectResults,
+      results: detailedResults,
       teacherComment: report.teacherComment || '',
       headComment: report.headComment || '',
       overallAverage,
       totalMarks,
       totalPossible,
-      passedCount,
-      totalSubjects: results.length
+      passed,
+      totalSubjects: results.length,
+      level
     });
 
-    // Generate PDF buffer
-    const pdfBuffer = await new Promise((resolve, reject) => {
-      pdf.create(html, { format: 'A4', printBackground: true, border: '0.5in' }).toBuffer((err, buffer) => {
-        if (err) reject(err);
-        else resolve(buffer);
-      });
+    // Launch Puppeteer with the correct Chromium path
+    const browser = await puppeteer.launch({
+      executablePath: getChromiumPath(),
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
+    await browser.close();
     return pdfBuffer;
+
   } catch (err) {
     console.error('PDF generation error:', err);
     return null;
   }
 }
 
-function getGradeAndComment(marks, form) {
+// ---------- Helper: grade & comment ----------
+function getGradeAndComment(marks, level) {
   const num = Number(marks);
-  const isAlevel = form?.includes('Form 5') || form?.includes('Form 6');
-  if (isAlevel) {
-    if (num >= 75) return { grade: 'A', comment: 'Distinction' };
-    if (num >= 65) return { grade: 'B', comment: 'Merit' };
-    if (num >= 50) return { grade: 'C', comment: 'Pass' };
-    if (num >= 40) return { grade: 'D', comment: 'Satisfactory' };
-    if (num >= 30) return { grade: 'E', comment: 'Work Hard' };
-    return { grade: 'F', comment: 'Ungraded/Fail' };
-  } else {
+  if (isNaN(num)) return { grade: '-', comment: '' };
+  if (level === 'olevel') {
     if (num >= 70) return { grade: 'A', comment: 'Excellent' };
     if (num >= 60) return { grade: 'B', comment: 'Very Good' };
     if (num >= 50) return { grade: 'C', comment: 'Good' };
     if (num >= 45) return { grade: 'D', comment: 'Satisfactory' };
     if (num >= 40) return { grade: 'E', comment: 'Pass' };
     return { grade: 'U', comment: 'Ungraded' };
+  } else {
+    if (num >= 75) return { grade: 'A', comment: 'Distinction' };
+    if (num >= 65) return { grade: 'B', comment: 'Merit' };
+    if (num >= 50) return { grade: 'C', comment: 'Pass' };
+    if (num >= 40) return { grade: 'D', comment: 'Satisfactory Pass' };
+    if (num >= 30) return { grade: 'E', comment: 'Work Hard' };
+    return { grade: 'F', comment: 'Ungraded / Fail' };
   }
 }
 
-function buildReportCardHTML(data) {
-  const { school, student, term, year, results, teacherComment, headComment, overallAverage, totalMarks, totalPossible, passedCount, totalSubjects } = data;
-  const level = student.class?.includes('Form 5') || student.class?.includes('Form 6') ? 'alevel' : 'olevel';
-  const rows = results.map(r => `
-    <tr>
-      <td style="border:1px solid #ddd; padding:6px;">${r.subject}</td>
-      <td style="border:1px solid #ddd; padding:6px; text-align:center;">${r.marks} / 100</td>
-      <td style="border:1px solid #ddd; padding:6px; text-align:center;">${r.avg}</td>
-      <td style="border:1px solid #ddd; padding:6px; text-align:center;"><span style="padding:2px 6px; border-radius:20px; background:${getGradeColor(r.grade)}; color:white;">${r.grade}</span></td>
-      <td style="border:1px solid #ddd; padding:6px;">${r.comment}</td>
+function getGradeBadgeClass(grade) {
+  switch(grade) {
+    case 'A': return 'bg-green-100 text-green-800';
+    case 'B': return 'bg-blue-100 text-blue-800';
+    case 'C': return 'bg-yellow-100 text-yellow-800';
+    case 'D': return 'bg-orange-100 text-orange-800';
+    case 'E': return 'bg-orange-100 text-orange-800';
+    default: return 'bg-red-100 text-red-800';
+  }
+}
+
+// ---------- Build the final HTML (exactly like the sample) ----------
+function buildReportHTML(data) {
+  const { school, studentName, studentClass, studentId, term, year, results, teacherComment, headComment, overallAverage, totalMarks, totalPossible, passed, totalSubjects, level } = data;
+
+  const tableRows = results.map(r => `
+    <tr class="result-row border-b hover:bg-gray-50 transition">
+      <td class="px-2 py-2 border-b text-gray-800 font-medium">${escapeHtml(r.subject)}</td>
+      <td class="px-2 py-2 border-b">${r.marks} / 100</td>
+      <td class="px-2 py-2 border-b">${r.avg}</td>
+      <td class="px-2 py-2 border-b">
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${getGradeBadgeClass(r.grade)}">${r.grade}</span>
+      </td>
+      <td class="px-2 py-2 border-b text-gray-500 italic">${r.comment}</td>
     </tr>
   `).join('');
 
+  const footerRows = `
+    <tfoot class="bg-gray-50 text-sm">
+      <tr class="border-t">
+        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Total Marks</td>
+        <td class="px-2 py-2 font-semibold text-gray-800">${totalMarks} / ${totalPossible}</td>
+      </tr>
+      <tr class="border-t">
+        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Overall Percentage</td>
+        <td class="px-2 py-2 font-semibold text-gray-800">${overallAverage}%</td>
+      </tr>
+      <tr class="border-t">
+        <td colspan="4" class="px-2 py-2 text-right font-semibold text-gray-700">Subjects Passed</td>
+        <td class="px-2 py-2 font-semibold text-gray-800">${passed} / ${totalSubjects} (≥50%)</td>
+      </tr>
+    </tfoot>
+  `;
+
+  const legend = level === 'olevel'
+    ? `<span>A=70-100</span><span>B=60-69</span><span>C=50-59</span><span>D=45-49</span><span>E=40-44</span><span>U=0-39</span>`
+    : `<span>A=75-100</span><span>B=65-74</span><span>C=50-64</span><span>D=40-49</span><span>E=30-39</span><span>F=0-29</span>`;
+
   return `<!DOCTYPE html>
-  <html>
-  <head><meta charset="UTF-8"><title>Report Card</title>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>EduTrack Report Card</title>
+  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; }
-    .container { max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 12px; }
-    .header { text-align: center; border-bottom: 1px solid #ddd; margin-bottom: 15px; }
-    .school-name { font-size: 24px; font-weight: bold; color: #4f46e5; }
-    .school-details { font-size: 12px; color: #6b7280; }
-    .student-details { display: flex; flex-wrap: wrap; justify-content: space-between; background: #f9fafb; padding: 12px; border-radius: 8px; margin-bottom: 20px; }
-    .student-detail-item { flex: 1; min-width: 120px; }
-    table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-    th { background-color: #f3f4f6; }
-    .footer { text-align: center; margin-top: 20px; font-size: 11px; color: #9ca3af; }
-    .signatures { display: flex; justify-content: space-between; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 15px; }
-    .signature-item { text-align: center; width: 30%; }
-    .grading-legend { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 15px; font-size: 11px; color: #6b7280; }
-    .comment-box { margin-top: 15px; background: #f9fafb; padding: 8px; border-left: 4px solid #4f46e5; }
+    /* print styles */
+    @media print {
+      body * { visibility: hidden; }
+      .report-print-area, .report-print-area * { visibility: visible; }
+      .report-print-area { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; box-shadow: none; }
+      .no-print { display: none; }
+      table, tr, td, th { page-break-inside: avoid; }
+    }
+    .result-row:hover { background-color: #f9fafb; transition: 0.1s; }
   </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="header">
-        <div class="school-name">${school.name}</div>
-        <div class="school-details">${school.address} • ${school.phone} • ${school.email}</div>
-        <div style="margin-top:5px;"><strong>Student Report Card</strong></div>
+</head>
+<body class="bg-gray-100 py-6 px-4 font-sans antialiased">
+  <div class="max-w-5xl mx-auto">
+    <!-- hide buttons when generating PDF, but they are not needed -->
+    <div class="report-print-area">
+      <div class="bg-white rounded-xl shadow-lg overflow-hidden print:shadow-none border border-gray-100">
+        <div class="p-5 md:p-6 print:p-4">
+          <!-- School Header -->
+          <div class="text-center border-b border-gray-200 pb-3 mb-4">
+            <h2 class="text-2xl font-extrabold text-gray-800 tracking-tight">${escapeHtml(school.name)}</h2>
+            ${school.address ? `<p class="text-gray-600 text-xs mt-0.5">${escapeHtml(school.address)}</p>` : ''}
+            ${school.phone ? `<p class="text-gray-500 text-xs">${escapeHtml(school.phone)}</p>` : ''}
+            ${school.email ? `<p class="text-gray-500 text-xs">${escapeHtml(school.email)}</p>` : ''}
+          </div>
+
+          <!-- Student Details Grid (with Class) -->
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 bg-gray-50 p-3 rounded-lg mb-5 text-sm">
+            <div><p class="text-xs text-gray-500">Student Name</p><p class="font-bold text-gray-800">${escapeHtml(studentName)}</p></div>
+            <div><p class="text-xs text-gray-500">Class</p><p class="font-bold text-gray-800">${escapeHtml(studentClass)}</p></div>
+            <div><p class="text-xs text-gray-500">Student ID</p><p class="font-bold text-gray-800">${escapeHtml(studentId)}</p></div>
+            <div><p class="text-xs text-gray-500">Term</p><p class="font-bold text-gray-800">${term}</p></div>
+            <div><p class="text-xs text-gray-500">Year</p><p class="font-bold text-gray-800">${year}</p></div>
+            <div><p class="text-xs text-gray-500">Overall Avg</p><p class="font-bold text-gray-800">${overallAverage}%</p></div>
+          </div>
+
+          <!-- Results Table -->
+          <div class="overflow-x-auto mb-5">
+            <table class="min-w-full text-xs border border-gray-200 rounded-md">
+              <thead class="bg-gray-100">
+                <tr>
+                  <th class="px-2 py-2 text-left font-semibold text-gray-700">Subject</th>
+                  <th class="px-2 py-2 text-left font-semibold text-gray-700">Marks</th>
+                  <th class="px-2 py-2 text-left font-semibold text-gray-700">Class Avg</th>
+                  <th class="px-2 py-2 text-left font-semibold text-gray-700">Grade</th>
+                  <th class="px-2 py-2 text-left font-semibold text-gray-700">Comment</th>
+                </tr>
+              </thead>
+              <tbody>${tableRows}</tbody>
+              ${footerRows}
+            </table>
+          </div>
+
+          <!-- Comments -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 text-sm">
+            <div><p class="text-xs font-semibold text-gray-600 uppercase tracking-wide">Teacher's Comment</p><div class="border border-gray-200 rounded-lg p-2.5 min-h-[70px] bg-gray-50 text-gray-700 leading-relaxed">${escapeHtml(teacherComment) || ''}</div></div>
+            <div><p class="text-xs font-semibold text-gray-600 uppercase tracking-wide">Head's Comment</p><div class="border border-gray-200 rounded-lg p-2.5 min-h-[70px] bg-gray-50 text-gray-700 leading-relaxed">${escapeHtml(headComment) || ''}</div></div>
+          </div>
+
+          <!-- Signatures & Stamp -->
+          <div class="flex flex-wrap justify-between items-end mt-5 pt-3 border-t border-gray-200 text-xs">
+            <div class="text-center w-28"><p class="text-gray-500 text-xs">Teacher's Signature</p><div class="mt-1 w-full border-b border-gray-400 h-6"></div></div>
+            <div class="text-center w-28"><p class="text-gray-500 text-xs">Head's Signature</p><div class="mt-1 w-full border-b border-gray-400 h-6"></div></div>
+            <div class="text-center"><div class="w-12 h-12 border-2 border-gray-400 rounded-md mx-auto flex items-center justify-center text-gray-500 text-xs font-mono">STAMP</div><p class="text-xs text-gray-500 mt-1">Official Stamp</p></div>
+          </div>
+
+          <!-- Grading Legend -->
+          <div class="mt-4 pt-2 border-t border-gray-200 text-xs text-gray-500 flex flex-wrap gap-3 justify-center">${legend}</div>
+          <div class="text-center text-gray-400 text-[11px] mt-3">Generated on ${new Date().toLocaleDateString()} – EduTrack</div>
+        </div>
       </div>
-
-      <div class="student-details">
-        <div class="student-detail-item"><strong>Name:</strong> ${student.name}</div>
-        <div class="student-detail-item"><strong>Form:</strong> ${student.class}</div>
-        <div class="student-detail-item"><strong>Student ID:</strong> ${student.studentId}</div>
-        <div class="student-detail-item"><strong>Term:</strong> ${term} | <strong>Year:</strong> ${year}</div>
-        <div class="student-detail-item"><strong>Overall Avg:</strong> ${overallAverage}%</div>
-        <div class="student-detail-item"><strong>Passed Subjects:</strong> ${passedCount} / ${totalSubjects} (≥50%)</div>
-      </div>
-
-      <table>
-        <thead>
-          <tr><th>Subject</th><th>Marks</th><th>Class Avg</th><th>Grade</th><th>Comment</th></tr>
-        </thead>
-        <tbody>${rows}</tbody>
-        <tfoot>
-          <tr><td colspan="2" style="text-align:right"><strong>Total Marks:</strong></td><td colspan="3"><strong>${totalMarks} / ${totalPossible}</strong></td></tr>
-          <tr><td colspan="2" style="text-align:right"><strong>Overall Percentage:</strong></td><td colspan="3"><strong>${overallAverage}%</strong></td></tr>
-        </tfoot>
-      </table>
-
-      <div class="comment-box"><strong>Teacher's Comment:</strong><br/>${teacherComment || '—'}</div>
-      <div class="comment-box"><strong>Head Comment:</strong><br/>${headComment || '—'}</div>
-
-      <div class="signatures">
-        <div class="signature-item">Teacher's Signature<br/><div style="border-bottom:1px solid #000; width:80%; margin:5px auto; height:30px;"></div></div>
-        <div class="signature-item">Head's Signature<br/><div style="border-bottom:1px solid #000; width:80%; margin:5px auto; height:30px;"></div></div>
-        <div class="signature-item">School Stamp<br/><div style="border:1px solid #000; width:50px; height:50px; margin:5px auto; text-align:center; line-height:50px;">STAMP</div></div>
-      </div>
-
-      <div class="grading-legend">
-        ${level === 'olevel' 
-          ? '<span>A=70-100</span><span>B=60-69</span><span>C=50-59</span><span>D=45-49</span><span>E=40-44</span><span>U=0-39</span>'
-          : '<span>A=75-100</span><span>B=65-74</span><span>C=50-64</span><span>D=40-49</span><span>E=30-39</span><span>F=0-29</span>'}
-      </div>
-      <div class="footer">Generated by EduTrak • ${new Date().toLocaleString()}</div>
     </div>
-  </body>
-  </html>`;
+  </div>
+</body>
+</html>`;
 }
 
-function getGradeColor(grade) {
-  switch(grade) {
-    case 'A': return '#22c55e';
-    case 'B': return '#3b82f6';
-    case 'C': return '#eab308';
-    case 'D': return '#f97316';
-    case 'E': return '#f97316';
-    default: return '#ef4444';
-  }
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/[&<>]/g, function(m) {
+    if (m === '&') return '&amp;';
+    if (m === '<') return '&lt;';
+    if (m === '>') return '&gt;';
+    return m;
+  });
 }
 
 // ---------- WhatsApp API Helpers (unchanged) ----------
 async function sendText(to, message) {
   const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
-  const payload = {
-    messaging_product: 'whatsapp',
-    to,
-    type: 'text',
-    text: { body: message }
-  };
+  const payload = { messaging_product: 'whatsapp', to, type: 'text', text: { body: message } };
   await callWhatsAppAPI(url, payload);
 }
 
@@ -412,42 +438,26 @@ async function sendDocument(to, buffer, filename) {
   form.append('messaging_product', 'whatsapp');
   form.append('type', 'application/pdf');
   form.append('file', buffer, { filename });
-
   const mediaRes = await fetch(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${ACCESS_TOKEN}`,
-      ...form.getHeaders()
-    },
+    headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, ...form.getHeaders() },
     body: form
   });
   const mediaData = await mediaRes.json();
   if (!mediaRes.ok) throw new Error(`Media upload failed: ${JSON.stringify(mediaData)}`);
   const mediaId = mediaData.id;
-
   const msgUrl = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
-  const payload = {
-    messaging_product: 'whatsapp',
-    to,
-    type: 'document',
-    document: { id: mediaId, filename, caption: '📄 Your report card' }
-  };
+  const payload = { messaging_product: 'whatsapp', to, type: 'document', document: { id: mediaId, filename, caption: '📄 Your report card' } };
   await callWhatsAppAPI(msgUrl, payload);
 }
 
 async function callWhatsAppAPI(url, payload) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${ACCESS_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
+    headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`WhatsApp API error: ${err}`);
-  }
+  if (!res.ok) { const err = await res.text(); throw new Error(`WhatsApp API error: ${err}`); }
   console.log('Message sent');
 }
 
