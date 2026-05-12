@@ -1,10 +1,8 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer');
 const FormData = require('form-data');
-const path = require('path');
-const fs = require('fs');
 require('dotenv').config();
 
 // ---------- Firebase initialization ----------
@@ -30,24 +28,6 @@ const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 const sessions = new Map();
-
-// ---------- Helper: Find Chromium executable (Render compatible) ----------
-function getChromiumExecutablePath() {
-  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
-  const cacheDir = path.join(process.cwd(), '.cache', 'puppeteer', 'chrome');
-  if (fs.existsSync(cacheDir)) {
-    const platforms = fs.readdirSync(cacheDir);
-    for (const platform of platforms) {
-      const exePath = path.join(cacheDir, platform, 'chrome-linux64', 'chrome');
-      if (fs.existsSync(exePath)) return exePath;
-    }
-  }
-  const commonPaths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'];
-  for (const p of commonPaths) {
-    if (fs.existsSync(p)) return p;
-  }
-  throw new Error('Chromium executable not found');
-}
 
 // ---------- Webhook Verification ----------
 app.get('/webhook', (req, res) => {
@@ -204,7 +184,7 @@ async function getSubjectAverages(classId, form, term, year) {
   return averages;
 }
 
-// ---------- PDF Generation using Puppeteer with exact sample HTML ----------
+// ---------- PDF Generation using Puppeteer (full version) ----------
 async function generateReportCardPDF(student, report, schoolId) {
   try {
     // Fetch school details
@@ -230,7 +210,7 @@ async function generateReportCardPDF(student, report, schoolId) {
     const overallAverage = results.length ? (totalMarks / results.length).toFixed(2) : 0;
     const totalPossible = results.length * 100;
 
-    // Build HTML exactly like the sample, with TailwindCDN
+    // Build HTML exactly like the sample
     const html = buildReportCardHTML({
       school,
       studentName: student.name,
@@ -249,9 +229,8 @@ async function generateReportCardPDF(student, report, schoolId) {
       level
     });
 
-    // Launch Puppeteer
+    // Launch Puppeteer (no executablePath needed)
     const browser = await puppeteer.launch({
-      executablePath: getChromiumExecutablePath(),
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     const page = await browser.newPage();
@@ -287,9 +266,11 @@ function getGradeAndComment(marks, level) {
 
 // ---------- Build exactly the sample HTML structure ----------
 function buildReportCardHTML(data) {
+  // ... (same as previous, but using the provided buildReportCardHTML function from earlier)
+  // To avoid duplication, paste the exact buildReportCardHTML function from the previous message.
+  // Since it's long, I'll include it here in full:
   const { school, studentName, studentClass, studentId, term, year, results, teacherComment, headComment, overallAverage, totalMarks, totalPossible, passed, totalSubjects, level } = data;
 
-  // Generate rows
   let tableRows = '';
   for (const r of results) {
     const badgeColor = getBadgeColor(r.grade);
@@ -323,7 +304,7 @@ function buildReportCardHTML(data) {
     </tfoot>
   `;
 
-  const legendItems = level === 'olevel' 
+  const legendItems = level === 'olevel'
     ? `<span>A=70-100</span><span>B=60-69</span><span>C=50-59</span><span>D=45-49</span><span>E=40-44</span><span>U=0-39</span>`
     : `<span>A=75-100</span><span>B=65-74</span><span>C=50-64</span><span>D=40-49</span><span>E=30-39</span><span>F=0-29</span>`;
 
