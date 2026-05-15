@@ -29,6 +29,31 @@ const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 const sessions = new Map();
 
+// ---------- Helper: get current term and year ----------
+function getCurrentTermYear() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth(); // 0 = Jan
+  let term = '1';
+  if (month >= 3 && month <= 6) term = '2';  // Apr–Jul
+  else if (month >= 7) term = '3';          // Aug–Dec
+  return { term, year };
+}
+
+// ---------- Helper: get student fee balance ----------
+async function getStudentFeeBalance(studentId) {
+  try {
+    const studentRef = db.collection('students').doc(studentId);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists) return null;
+    const balance = studentSnap.data().feeBalance || 0;
+    return balance;
+  } catch (error) {
+    console.error('Error fetching fee balance:', error);
+    return null;
+  }
+}
+
 // ---------- Webhook Verification ----------
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -64,6 +89,40 @@ app.post('/webhook', async (req, res) => {
 
 // ---------- Conversation Logic ----------
 async function handleMessage(waId, text, session) {
+  // Help command (available at any step after student is known)
+  const lowerText = text.toLowerCase();
+  if (lowerText === 'help') {
+    let helpMsg = '📚 *EduTrak Bot Help*\n\n';
+    if (session.student) {
+      helpMsg += '✅ You are logged in.\n';
+      helpMsg += '• Send a number to download a report card.\n';
+      helpMsg += '• Send BALANCE to check your fee balance.\n';
+      helpMsg += '• Send LOG OUT to end session.\n';
+    } else {
+      helpMsg += '1. Select your school by typing its number.\n';
+      helpMsg += '2. Enter your Student ID (e.g., STD-123456).\n';
+      helpMsg += '3. Choose a report card number to download.\n';
+      helpMsg += '4. Send BALANCE to check fee balance.\n';
+      helpMsg += '5. Send LOG OUT at any time.\n';
+    }
+    await sendText(waId, helpMsg);
+    return;
+  }
+
+  // Balance command – only works after student is identified
+  if (lowerText === 'balance' && session.student) {
+    const { term, year } = getCurrentTermYear();
+    const balance = await getStudentFeeBalance(session.student.id);
+    if (balance === null) {
+      await sendText(waId, '❌ Could not retrieve fee balance. Please try again later.');
+    } else {
+      const balanceMsg = `💰 *Fee Balance for ${session.student.name}*\n\nTerm: ${term}\nYear: ${year}\nOutstanding balance: $${balance.toFixed(2)}\n\nTo download a report card, type the number of the report.`;
+      await sendText(waId, balanceMsg);
+    }
+    return;
+  }
+
+  // Original flow continues...
   if (session.step === 'start') {
     const schools = await getAllSchools();
     if (schools.length === 0) {
@@ -71,7 +130,7 @@ async function handleMessage(waId, text, session) {
       return;
     }
     const schoolList = schools.map((s, idx) => `${idx+1}. ${s.name}`).join('\n');
-    await sendText(waId, `👋 *EduTrak Bot*\n\nSelect your school by typing the number:\n\n${schoolList}\n\n_Type "log out" to exit._`);
+    await sendText(waId, `👋 *EduTrak Bot*\n\nSelect your school by typing the number:\n\n${schoolList}\n\n_Type "HELP" for commands, "LOG OUT" to exit._`);
     session.step = 'awaiting_school';
     sessions.set(waId, session);
     return;
@@ -89,7 +148,7 @@ async function handleMessage(waId, text, session) {
     session.schoolName = selectedSchool.name;
     session.step = 'awaiting_student_id';
     sessions.set(waId, session);
-    await sendText(waId, `✅ *${selectedSchool.name}*\n\nEnter your Student ID.\n_Format: STD-123456_\n\n_Type "log out" to exit._`);
+    await sendText(waId, `✅ *${selectedSchool.name}*\n\nEnter your Student ID.\n_Format: STD-123456_\n\n_Type "HELP" for commands._`);
     return;
   }
 
@@ -117,7 +176,7 @@ async function handleMessage(waId, text, session) {
     sessions.set(waId, session);
     let list = '';
     reports.forEach((r, i) => { list += `${i+1}. ${r.form} - Term ${r.term} - ${r.year}\n`; });
-    await sendText(waId, `✅ *${student.name}*\n\n📄 Available reports:\n${list}\n\nType the number of the report you want.`);
+    await sendText(waId, `✅ *${student.name}*\n\n📄 Available reports:\n${list}\n\nType the number of the report you want.\n\n_You can also type "BALANCE" to check fees._`);
     return;
   }
 
@@ -184,7 +243,7 @@ async function getSubjectAverages(classId, form, term, year) {
   return averages;
 }
 
-// ---------- PDF Generation (html-pdf, professional, one page) ----------
+// ---------- PDF Generation (unchanged) ----------
 async function generateReportCardPDF(student, report, schoolId) {
   try {
     const schoolDoc = await db.collection('schools').doc(schoolId).get();
@@ -209,7 +268,6 @@ async function generateReportCardPDF(student, report, schoolId) {
     const overallAverage = results.length ? (totalMarks / results.length).toFixed(2) : 0;
     const totalPossible = results.length * 100;
 
-    // Build compact, A4-friendly HTML
     const html = buildReportCardHTML({
       school,
       studentName: student.name,
@@ -414,9 +472,7 @@ function buildReportCardHTML(data) {
   </div>
 
   <table>
-    <thead>
-      <tr><th>Subject</th><th>Marks</th><th>Class Avg</th><th>Grade</th><th>Comment</th></tr>
-    </thead>
+    <thead><tr><th>Subject</th><th>Marks</th><th>Class Avg</th><th>Grade</th><th>Comment</th></tr></thead>
     <tbody>${tableRows}</tbody>
     <tfoot>
       <tr><td colspan="4" style="text-align:right;"><strong>Total Marks:</strong></td><td><strong>${totalMarks} / ${totalPossible}</strong></td></tr>
@@ -475,7 +531,12 @@ async function sendDocument(to, buffer, filename) {
   if (!mediaRes.ok) throw new Error(`Media upload failed: ${JSON.stringify(mediaData)}`);
   const mediaId = mediaData.id;
   const msgUrl = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
-  const payload = { messaging_product: 'whatsapp', to, type: 'document', document: { id: mediaId, filename, caption: '📄 This is a digital copy. To download the original report card, please log in to your EduTrack account at https:/edutrack4.netlify.app' } };
+  const payload = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'document',
+    document: { id: mediaId, filename, caption: '📄 This is a digital copy. To download the original report card, please log in to your EduTrack account at https://edutrack4.netlify.app' }
+  };
   await callWhatsAppAPI(msgUrl, payload);
 }
 
